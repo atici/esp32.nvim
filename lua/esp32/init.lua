@@ -8,6 +8,8 @@ local defaults = {
   idf_cmd = nil,
 }
 
+local targets
+
 M.options = vim.deepcopy(defaults)
 M.state = {
   last_port = nil,
@@ -263,6 +265,53 @@ end
 vim.api.nvim_create_user_command("ESPBuild", function()
   M.build()
 end, {})
+
+function M.get_targets()
+  local cmd =  M.make_idf_command("--list-targets");
+  local str = vim.fn.system(cmd);
+  local items = {}
+  for line in str:gmatch("[^\r\n]+") do
+    table.insert(items, { text = line })
+  end
+  return items
+end
+
+function M.set_target()
+  if not targets then
+    targets = M.get_targets()
+  end
+  local Snacks = get_snacks()
+  Snacks.picker.pick({
+    ui_select = true,
+    -- focus = "list",
+    items = targets,
+    layout = {
+      layout = {
+        box = "horizontal",
+        width = 0.2,
+        height = 0.3,
+        {
+          box = "vertical",
+          border = "single",
+          title = "Select ESP32 target",
+          -- title = "IDF targets",
+          { win = "input", height = 1,     border = "bottom" },
+          { win = "list",  border = "none" },
+        },
+      },
+    },
+    format = function(item)
+      return { { item.text } }
+    end,
+    confirm = function(picker, item)
+      picker:close()
+      if not item then
+        return
+      end
+      M.command("set-target " .. item.text)
+    end,
+  })
+end
 
 --- Create Snacks picker for port and run idf.py command
 function M.pick(cmd)
