@@ -267,12 +267,14 @@ vim.api.nvim_create_user_command("ESPBuild", function()
 end, {})
 
 function M.get_targets()
+  -- get targets from idf.py
   local cmd =  M.make_idf_command("--list-targets");
   local str = vim.fn.system(cmd);
   -- check if we found what we're looking for
   if not str:match("esp32") then
     return
   end
+
   local items = {}
   for line in str:gmatch("[^\r\n]+") do
     table.insert(items, { text = line })
@@ -281,6 +283,7 @@ function M.get_targets()
 end
 
 function M.set_target()
+  -- targets is global so we dont have to check it every time.
   if not targets then
     targets = M.get_targets()
     if not targets then
@@ -292,7 +295,6 @@ function M.set_target()
   local Snacks = get_snacks()
   Snacks.picker.pick({
     ui_select = true,
-    -- focus = "list",
     items = targets,
     layout = {
       layout = {
@@ -303,7 +305,6 @@ function M.set_target()
           box = "vertical",
           border = "single",
           title = "Select ESP32 target",
-          -- title = "IDF targets",
           { win = "input", height = 1,     border = "bottom" },
           { win = "list",  border = "none" },
         },
