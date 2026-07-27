@@ -269,6 +269,10 @@ end, {})
 function M.get_targets()
   local cmd =  M.make_idf_command("--list-targets");
   local str = vim.fn.system(cmd);
+  -- check if we found what we're looking for
+  if not str:match("esp32") then
+    return
+  end
   local items = {}
   for line in str:gmatch("[^\r\n]+") do
     table.insert(items, { text = line })
@@ -279,7 +283,12 @@ end
 function M.set_target()
   if not targets then
     targets = M.get_targets()
+    if not targets then
+      vim.notify("[ESP32] No targets found.", vim.log.levels.WARN);
+      return
+    end
   end
+
   local Snacks = get_snacks()
   Snacks.picker.pick({
     ui_select = true,
@@ -444,6 +453,10 @@ end, {})
 
 vim.api.nvim_create_user_command("ESPInfo", function()
   M.info()
+end, {})
+
+vim.api.nvim_create_user_command("ESPSetTarget", function()
+  M.set_target()
 end, {})
 
 return M
