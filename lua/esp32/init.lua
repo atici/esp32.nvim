@@ -31,6 +31,10 @@ local function make_clangd_capabilities()
   return capabilities
 end
 
+local function is_windows()
+  return vim.fn.has("win32") == 1
+end
+
 local function get_home()
   return vim.env.HOME or vim.fn.expand("~")
 end
@@ -45,6 +49,54 @@ end
 
 local function executable_path(path)
   return path and vim.fn.executable(path) == 1
+end
+
+--- Candidate ESP-IDF tools directories, most specific first
+local function idf_tools_dirs()
+  local dirs = {}
+  local seen = {}
+
+  local function add(dir)
+    if dir and dir ~= "" and not seen[dir] then
+      seen[dir] = true
+      table.insert(dirs, dir)
+    end
+  end
+
+  if vim.env.IDF_TOOLS_PATH and vim.env.IDF_TOOLS_PATH ~= "" then
+    -- EIM points IDF_TOOLS_PATH at the tools dir itself, classic
+    -- idf_tools.py points it at the .espressif root with tools/ inside.
+    add(vim.env.IDF_TOOLS_PATH)
+    add(join_path(vim.env.IDF_TOOLS_PATH, "tools"))
+  end
+
+  add(join_path(get_home(), ".espressif", "tools"))
+
+  if is_windows() then
+    -- EIM's default install location on Windows
+    add("C:/Espressif/tools")
+  end
+
+  return dirs
+end
+
+--- Find the Python interpreter of an ESP-IDF virtualenv
+local function find_venv_python(env_path)
+  local candidates
+  if is_windows() then
+    candidates = {
+      join_path(env_path, "Scripts", "python.exe"),
+      join_path(env_path, "python.exe"),
+    }
+  else
+    candidates = { join_path(env_path, "bin", "python") }
+  end
+
+  for _, python in ipairs(candidates) do
+    if executable_path(python) then
+      return python
+    end
+  end
 end
 
 function M.setup(opts)
@@ -100,29 +152,32 @@ function M.find_esp_clangd()
     end
   end
 
-  local base = get_home() .. "/.espressif/tools/esp-clang"
-  local scandir = vim.uv.fs_scandir(base)
-  if not scandir then
-    return nil
-  end
-
-  local latest
-  local latest_key
-  while true do
-    local name = vim.uv.fs_scandir_next(scandir)
-    if not name then
-      break
-    end
-    if name:match("^esp%-.+") then
-      local candidate = base .. "/" .. name .. "/esp-clang/bin/clangd"
-      if vim.fn.executable(candidate) == 1 and (not latest_key or name > latest_key) then
-        latest = candidate
-        latest_key = name
+  for _, tools_dir in ipairs(idf_tools_dirs()) do
+    local base = join_path(tools_dir, "esp-clang")
+    local scandir = vim.uv.fs_scandir(base)
+    if scandir then
+      local latest
+      local latest_key
+      while true do
+        local name = vim.uv.fs_scandir_next(scandir)
+        if not name then
+          break
+        end
+        if name:match("^esp%-.+") then
+          local candidate = join_path(base, name, "esp-clang", "bin", "clangd")
+          if vim.fn.executable(candidate) == 1 and (not latest_key or name > latest_key) then
+            latest = candidate
+            latest_key = name
+          end
+        end
+      end
+      if latest then
+        return latest
       end
     end
   end
 
-  return latest
+  return nil
 end
 
 --- Resolve a command prefix that can run idf.py
@@ -139,8 +194,8 @@ function M.resolve_idf_cmd()
     local idf_py = join_path(vim.env.IDF_PATH, "tools", "idf.py")
     if vim.fn.filereadable(idf_py) == 1 then
       if vim.env.IDF_PYTHON_ENV_PATH then
-        local venv_python = join_path(vim.env.IDF_PYTHON_ENV_PATH, "bin", "python")
-        if executable_path(venv_python) then
+        local venv_python = find_venv_python(vim.env.IDF_PYTHON_ENV_PATH)
+        if venv_python then
           return shellescape(venv_python) .. " " .. shellescape(idf_py)
         end
       end
@@ -322,8 +377,12 @@ function M.info()
 
   if vim.env.IDF_PATH == nil then
     table.insert(messages, "⚠️ Source an ESP-IDF environment before launching Neovim:")
-    table.insert(messages, "source ~/.espressif/tools/activate_idf_<version>.sh")
-    table.insert(messages, "or source ~/esp/esp-idf/export.sh")
+    if is_windows() then
+      table.insert(messages, [[. C:\Espressif\tools\Microsoft.<version>.PowerShell_profile.ps1]])
+    else
+      table.insert(messages, "source ~/.espressif/tools/activate_idf_<version>.sh")
+      table.insert(messages, "or source ~/esp/esp-idf/export.sh")
+    end
   end
 
   vim.notify(table.concat(messages, "\n"), vim.log.levels.INFO)

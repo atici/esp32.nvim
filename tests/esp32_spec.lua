@@ -7,6 +7,7 @@ local original_notify = vim.notify
 local original_home = vim.env.HOME
 local original_idf_path = vim.env.IDF_PATH
 local original_idf_python_env_path = vim.env.IDF_PYTHON_ENV_PATH
+local original_idf_tools_path = vim.env.IDF_TOOLS_PATH
 local original_fn = {}
 local original_uv = {}
 local notifications = {}
@@ -91,6 +92,8 @@ local function prepare_case()
   vim.env.HOME = original_home
   vim.env.IDF_PATH = nil
   vim.env.IDF_PYTHON_ENV_PATH = nil
+  vim.env.IDF_TOOLS_PATH = nil
+  vim.fn.has = original_fn.has
   vim.fn.executable = function()
     return 0
   end
@@ -111,6 +114,7 @@ end
 
 T.hooks = {
   pre_once = function()
+    original_fn.has = vim.fn.has
     original_fn.executable = vim.fn.executable
     original_fn.system = vim.fn.system
     original_fn.exepath = vim.fn.exepath
@@ -125,6 +129,8 @@ T.hooks = {
     vim.env.HOME = original_home
     vim.env.IDF_PATH = original_idf_path
     vim.env.IDF_PYTHON_ENV_PATH = original_idf_python_env_path
+    vim.env.IDF_TOOLS_PATH = original_idf_tools_path
+    vim.fn.has = original_fn.has
     vim.fn.executable = original_fn.executable
     vim.fn.system = original_fn.system
     vim.fn.exepath = original_fn.exepath
@@ -195,6 +201,121 @@ T["find_esp_clangd() picks the newest installed Espressif clangd"] = function()
   expect.equality(clangd:match("esp%-20%.1%.1_20250829"), "esp-20.1.1_20250829")
   expect.equality(clangd:match("esp%-clang/bin/clangd$"), "esp-clang/bin/clangd")
   vim.env.HOME = previous_home
+end
+
+T["find_esp_clangd() honors IDF_TOOLS_PATH"] = function()
+  prepare_case()
+  vim.env.IDF_TOOLS_PATH = "/custom/espressif/tools"
+
+  set_scandir({
+    ["/custom/espressif/tools/esp-clang"] = {
+      "esp-19.1.2_20231212",
+      "esp-20.1.1_20250829",
+    },
+  })
+
+  vim.fn.executable = function(path)
+    if path == "clangd" then
+      return 0
+    end
+    return 1
+  end
+
+  local esp32 = load_module()
+  reset_plugin_state(esp32)
+
+  expect.equality(
+    esp32.find_esp_clangd(),
+    "/custom/espressif/tools/esp-clang/esp-20.1.1_20250829/esp-clang/bin/clangd"
+  )
+end
+
+T["find_esp_clangd() honors a classic IDF_TOOLS_PATH pointing at the .espressif root"] = function()
+  prepare_case()
+  vim.env.IDF_TOOLS_PATH = "/custom/espressif"
+
+  set_scandir({
+    ["/custom/espressif/tools/esp-clang"] = {
+      "esp-20.1.1_20250829",
+    },
+  })
+
+  vim.fn.executable = function(path)
+    if path == "clangd" then
+      return 0
+    end
+    return 1
+  end
+
+  local esp32 = load_module()
+  reset_plugin_state(esp32)
+
+  expect.equality(
+    esp32.find_esp_clangd(),
+    "/custom/espressif/tools/esp-clang/esp-20.1.1_20250829/esp-clang/bin/clangd"
+  )
+end
+
+T["find_esp_clangd() falls back to the Windows EIM tools dir"] = function()
+  prepare_case()
+  local previous_has = vim.fn.has
+  vim.fn.has = function(feature)
+    if feature == "win32" then
+      return 1
+    end
+    return previous_has(feature)
+  end
+
+  set_scandir({
+    ["C:/Espressif/tools/esp-clang"] = {
+      "esp-20.1.1_20250829",
+    },
+  })
+
+  vim.fn.executable = function(path)
+    if path == "clangd" then
+      return 0
+    end
+    return 1
+  end
+
+  local esp32 = load_module()
+  reset_plugin_state(esp32)
+  local clangd = esp32.find_esp_clangd()
+  vim.fn.has = previous_has
+
+  expect.equality(clangd, "C:/Espressif/tools/esp-clang/esp-20.1.1_20250829/esp-clang/bin/clangd")
+end
+
+T["resolve_idf_cmd() uses the Scripts python interpreter on Windows"] = function()
+  prepare_case()
+  local previous_has = vim.fn.has
+  vim.fn.has = function(feature)
+    if feature == "win32" then
+      return 1
+    end
+    return previous_has(feature)
+  end
+  vim.env.IDF_PATH = "C:/Espressif/frameworks/esp-idf-v6.0.2"
+  vim.env.IDF_PYTHON_ENV_PATH = "C:/Espressif/python_env/idf6.0_py3.11_env"
+
+  vim.fn.executable = function(path)
+    return path == "C:/Espressif/python_env/idf6.0_py3.11_env/Scripts/python.exe" and 1 or 0
+  end
+  vim.fn.filereadable = function(path)
+    return path == "C:/Espressif/frameworks/esp-idf-v6.0.2/tools/idf.py" and 1 or 0
+  end
+
+  local esp32 = load_module()
+  reset_plugin_state(esp32)
+  local cmd = esp32.resolve_idf_cmd()
+  vim.fn.has = previous_has
+
+  expect.equality(
+    cmd,
+    "'C:/Espressif/python_env/idf6.0_py3.11_env/Scripts/python.exe' "
+      .. "'C:/Espressif/frameworks/esp-idf-v6.0.2/tools/idf.py'"
+  )
 end
 
 T["lsp_config() uses build_dir, root markers, and appends clangd_args"] = function()
@@ -450,6 +571,33 @@ T["info() suggests EIM and manual activation when ESP-IDF is not active"] = func
     "⚠️ Source an ESP-IDF environment before launching Neovim:",
     "source ~/.espressif/tools/activate_idf_<version>.sh",
     "or source ~/esp/esp-idf/export.sh",
+  }, "\n"))
+end
+
+T["info() suggests the PowerShell profile on Windows when ESP-IDF is not active"] = function()
+  prepare_case()
+  local previous_has = vim.fn.has
+  vim.fn.has = function(feature)
+    if feature == "win32" then
+      return 1
+    end
+    return previous_has(feature)
+  end
+
+  local esp32 = load_module()
+  reset_plugin_state(esp32)
+  esp32.info()
+  vim.fn.has = previous_has
+
+  expect.equality(#notifications, 1)
+  expect.equality(notifications[1].message, table.concat({
+    "✗ ESP-specific clangd missing",
+    "✗ compile_commands.json missing",
+    "✗ idf.py",
+    "✗ llvm-ar",
+    "IDF_PATH: ✗ not set",
+    "⚠️ Source an ESP-IDF environment before launching Neovim:",
+    [[. C:\Espressif\tools\Microsoft.<version>.PowerShell_profile.ps1]],
   }, "\n"))
 end
 

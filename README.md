@@ -126,6 +126,13 @@ That configuration:
 - points the LSP at your configured `build_dir`
 - prefers `sdkconfig` and `CMakeLists.txt` as root markers so nested ESP-IDF projects do not attach to a parent git repository by accident
 
+The Espressif-specific `clangd` is located by checking, in order:
+
+1. `clangd` on `PATH` (if it identifies as an Espressif build)
+2. `$IDF_TOOLS_PATH/esp-clang`
+3. `~/.espressif/tools/esp-clang`
+4. `C:\Espressif\tools\esp-clang` (Windows, EIM's default install location)
+
 If you need additional `clangd` flags for your environment, you can pass them through `clangd_args`:
 
 ```lua
@@ -144,6 +151,8 @@ By default, ESP32.nvim runs `idf.py` from the active ESP-IDF environment. If `id
 ```bash
 $IDF_PYTHON_ENV_PATH/bin/python $IDF_PATH/tools/idf.py
 ```
+
+On Windows, the interpreter is resolved as `%IDF_PYTHON_ENV_PATH%\Scripts\python.exe` instead.
 
 This handles EIM shells where `idf.py` is provided as a shell function instead of a standalone executable. If your setup needs a custom wrapper, configure `idf_cmd`:
 
@@ -216,6 +225,22 @@ From now on, **always** build and flash using:
 idf.py -B build.clang build
 idf.py -B build.clang flash
 ```
+
+### Windows (EIM)
+
+On Windows, EIM installs to `C:\Espressif` by default (i.e. `IDF_TOOLS_PATH` is `C:\Espressif\tools`). Install ESP-IDF together with the Espressif clang toolchain:
+
+```powershell
+eim install --idf-tools=esp_clang
+```
+
+Then activate the generated environment before launching Neovim, so the ESP-IDF tools and environment variables are available:
+
+```powershell
+. C:\Espressif\tools\Microsoft.<version>.PowerShell_profile.ps1
+```
+
+The plugin locates the Espressif `clangd` through `PATH`, `IDF_TOOLS_PATH`, or the default `C:\Espressif\tools` location.
 
 ### Manual ESP-IDF Clone
 
