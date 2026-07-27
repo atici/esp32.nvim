@@ -145,19 +145,22 @@ function M.find_esp_clangd()
   -- if so, we are done
   if vim.fn.executable("clangd") == 1 then
     -- use `clangd --version` to check if it is from espressif
-    local path = os.getenv("PATH");
-    --local path_backup = path;
 
-    vim.notify(path);
+    local path = os.getenv("PATH");
+    local path_backup = path;
+    -- look for nvim mason in path and remove it if its found.
     if path and path:match("nvim%-data/mason") then
       path = string.gsub(path, "[^;]-nvim%-data[/\\]mason[^;]*;?", "");
-      vim.notify(path);
+      vim.env.PATH = path;
     end;
 
     local clangd_version = vim.fn.system("clangd --version")
     if clangd_version:match("espressif") then
       -- return the absolute path to clangd
-      return vim.fn.exepath("clangd")
+      local exe_path = vim.fn.exepath("clangd")
+      -- Revert the PATH env variable.
+      vim.env.PATH = path_backup;
+      return exe_path;
     end
   end
 
