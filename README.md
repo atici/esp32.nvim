@@ -68,7 +68,7 @@ ESP32 commands open in a floating terminal, which automatically closes when the 
 opts = {
   build_dir = "build.clang", -- directory for CMake builds (must match your clangd compile_commands.json)
   clangd_args = {}, -- optional extra clangd arguments
-  idf_cmd = nil, -- optional idf.py command override
+  idf_cmd = nil, -- optional idf.py executable or argv override, e.g. { "mise", "exec", "--", "idf.py" }
 }
 ```
 

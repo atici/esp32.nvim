@@ -182,14 +182,18 @@ function M.find_esp_clangd()
   return nil
 end
 
---- Resolve a command prefix that can run idf.py
-function M.resolve_idf_cmd()
+--- Resolve argv that can run idf.py without involving a shell
+function M.resolve_idf_argv()
+  if type(M.options.idf_cmd) == "table" and #M.options.idf_cmd > 0 then
+    return vim.deepcopy(M.options.idf_cmd)
+  end
+
   if type(M.options.idf_cmd) == "string" and M.options.idf_cmd ~= "" then
-    return M.options.idf_cmd
+    return { M.options.idf_cmd }
   end
 
   if executable_path("idf.py") then
-    return "idf.py"
+    return { "idf.py" }
   end
 
   if vim.env.IDF_PATH then
@@ -198,13 +202,28 @@ function M.resolve_idf_cmd()
       if vim.env.IDF_PYTHON_ENV_PATH then
         local venv_python = find_venv_python(vim.env.IDF_PYTHON_ENV_PATH)
         if venv_python then
-          return shellescape(venv_python) .. " " .. shellescape(idf_py)
+          return { venv_python, idf_py }
         end
       end
     end
   end
 
-  return "idf.py"
+  return { "idf.py" }
+end
+
+--- Escape argv as a command line for terminal-backed commands
+function M.resolve_idf_cmd()
+  local argv = M.resolve_idf_argv()
+  local escaped = {}
+
+  for _, arg in ipairs(argv) do
+    -- Keep ordinary command names and paths readable. Anything containing
+    -- whitespace or shell syntax must stay one argument in the terminal.
+    local unsafe = tostring(arg):gsub("[%w%._/%-]", ""):gsub(":", ""):gsub("\\", "")
+    table.insert(escaped, #argv == 1 and unsafe == "" and tostring(arg) or shellescape(arg))
+  end
+
+  return table.concat(escaped, " ")
 end
 
 --- Root markers of an ESP-IDF project, most specific first
@@ -253,7 +272,7 @@ end
 ---
 --- The terminal inherits Neovim's working directory, which is not necessarily
 --- the project, so point idf.py at the resolved root with -C when there is one.
-function M.make_idf_command(cmd, port)
+function M.make_idf_command(cmd, port, opts)
   local root = M.project_root()
   local full_cmd = M.resolve_idf_cmd()
 
@@ -263,12 +282,32 @@ function M.make_idf_command(cmd, port)
 
   full_cmd = full_cmd .. " -B " .. shellescape(build_dir_for(root))
 
-  local selected_port = port or M.state.last_port
+  local selected_port = not (opts and opts.include_port == false) and (port or M.state.last_port)
   if selected_port then
     full_cmd = full_cmd .. " -p " .. shellescape(selected_port)
   end
 
   return full_cmd .. " " .. cmd
+end
+
+--- Create idf.py argv for shell-independent process execution
+function M.make_idf_argv(args, port, opts)
+  local root = M.project_root()
+  local argv = M.resolve_idf_argv()
+
+  if root then
+    vim.list_extend(argv, { "-C", root })
+  end
+
+  vim.list_extend(argv, { "-B", build_dir_for(root) })
+
+  local selected_port = not (opts and opts.include_port == false) and (port or M.state.last_port)
+  if selected_port then
+    vim.list_extend(argv, { "-p", selected_port })
+  end
+
+  vim.list_extend(argv, args or {})
+  return argv
 end
 
 --- Build systems prefix the real compiler with these, so skip past them
@@ -523,10 +562,8 @@ end, {})
 function M.parse_targets(output)
   local items = {}
 
-  -- The command runs through 'shell', whose startup files print to stdout even
-  -- when non-interactive, so the output is not idf.py's alone. Only keep lines
-  -- that are a bare target name: anything else would become a picker entry
-  -- and, via confirm(), reach the shell unescaped.
+  -- Only keep bare target names from the external command. Anything else would
+  -- become a picker entry and, via confirm(), reach a terminal shell.
   for line in (output or ""):gmatch("[^\r\n]+") do
     local target = line:match("^%s*(esp%w+)%s*$")
     if target then
@@ -547,9 +584,10 @@ end
 --- noticeable, so this runs in the background and hands the parsed targets (or
 --- nil) to on_targets on the main loop.
 function M.get_targets(on_targets)
-  local cmd = M.resolve_idf_cmd() .. " --list-targets"
+  local cmd = M.resolve_idf_argv()
+  table.insert(cmd, "--list-targets")
 
-  vim.system({ vim.o.shell, vim.o.shellcmdflag, cmd }, { text = true }, function(result)
+  vim.system(cmd, { text = true }, function(result)
     -- idf.py reports environment problems on stderr; only stdout can hold
     -- targets.
     local parsed = M.parse_targets(result.stdout)
@@ -586,7 +624,7 @@ local function open_target_picker()
       if not item then
         return
       end
-      M.command("set-target " .. item.text)
+      M.change_target(item.text)
     end,
   })
 end
@@ -645,14 +683,11 @@ function M.pick(cmd)
   })
 end
 
---- Finish an idf.py reconfigure after its terminal exits
----
---- clangd only reads --compile-commands-dir at startup, so a regenerated build
---- directory does not reach a running server. Restart it once idf.py succeeds.
-function M.complete_reconfigure(root, status, terminal)
+--- Finish an idf.py operation that replaces the clang compile database
+local function complete_project_change(root, status, terminal, failure_label, success_message)
   if status ~= 0 then
     vim.notify(
-      "[ESP32] Reconfigure failed with exit code " .. tostring(status) .. ".\nCheck the terminal output.",
+      "[ESP32] " .. failure_label .. " failed with exit code " .. tostring(status) .. ".\nCheck the terminal output.",
       vim.log.levels.ERROR
     )
     return false
@@ -664,8 +699,64 @@ function M.complete_reconfigure(root, status, terminal)
   vim.cmd.checktime()
 
   if M.restart_clangd(root) then
-    vim.notify("[ESP32] Reconfigured, restarting clangd.", vim.log.levels.INFO)
+    vim.notify("[ESP32] " .. success_message .. ", restarting clangd.", vim.log.levels.INFO)
   end
+
+  return true
+end
+
+--- Finish an idf.py reconfigure after its terminal exits
+---
+--- clangd only reads --compile-commands-dir at startup, so a regenerated build
+--- directory does not reach a running server. Restart it once idf.py succeeds.
+function M.complete_reconfigure(root, status, terminal)
+  return complete_project_change(root, status, terminal, "Reconfigure", "Reconfigured")
+end
+
+--- Finish an idf.py set-target after its terminal exits
+function M.complete_target_change(root, status, terminal)
+  return complete_project_change(root, status, terminal, "Set target", "Target changed")
+end
+
+--- Change the project target while keeping a clang compile database
+function M.change_target(target)
+  if type(target) ~= "string" or not target:match("^esp%w+$") then
+    vim.notify("[ESP32] Invalid target.", vim.log.levels.ERROR)
+    return false
+  end
+
+  local Snacks = get_snacks()
+  local root = M.project_root()
+
+  -- set-target clears and regenerates the build directory, so let the new
+  -- clangd client check it again.
+  checked_roots = {}
+
+  local terminal = Snacks.terminal.open(
+    M.make_idf_argv({ "-D", "IDF_TOOLCHAIN=clang", "set-target", target }, nil, { include_port = false }),
+    {
+      auto_close = false,
+      win = {
+        width = 0.5,
+        height = 0.4,
+        title = "ESP-IDF Set Target",
+        title_pos = "center",
+      },
+    }
+  )
+
+  local bufnr = type(terminal) == "table" and terminal.buf
+  if not bufnr then
+    return false
+  end
+
+  vim.api.nvim_create_autocmd("TermClose", {
+    buffer = bufnr,
+    once = true,
+    callback = function()
+      M.complete_target_change(root, vim.v.event.status, terminal)
+    end,
+  })
 
   return true
 end
