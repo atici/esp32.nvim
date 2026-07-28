@@ -641,6 +641,173 @@ T["LspAttach checks the project clangd attached to, once per root"] = function()
   expect_truthy(notifications[1].message:match("^%[ESP32%].*/project/blink/build%.clang"))
 end
 
+T["restart_clangd() replaces the matching client and reattaches its buffers"] = function()
+  prepare_case()
+  local esp32 = load_module()
+  reset_plugin_state(esp32)
+
+  local previous_get_clients = vim.lsp.get_clients
+  local previous_start = vim.lsp.start
+  local previous_buf_is_valid = vim.api.nvim_buf_is_valid
+  local previous_schedule = vim.schedule
+  local matching_stopped = false
+  local other_stopped = false
+  local requested_filter
+  local starts = {}
+  local config = {
+    name = "clangd",
+    root_dir = "/project/blink",
+  }
+
+  vim.lsp.get_clients = function(filter)
+    requested_filter = filter
+    return {
+      {
+        root_dir = "/project/blink",
+        attached_buffers = { [12] = "c", [11] = "c" },
+        config = config,
+        stop = function()
+          matching_stopped = true
+        end,
+      },
+      {
+        root_dir = "/project/other",
+        stop = function()
+          other_stopped = true
+        end,
+      },
+    }
+  end
+  vim.api.nvim_buf_is_valid = function()
+    return true
+  end
+  vim.schedule = function(callback)
+    callback()
+  end
+  vim.lsp.start = function(client_config, opts)
+    table.insert(starts, { config = client_config, bufnr = opts.bufnr })
+    return 42
+  end
+
+  local restarted = esp32.restart_clangd("/project/blink")
+
+  vim.lsp.get_clients = previous_get_clients
+  vim.lsp.start = previous_start
+  vim.api.nvim_buf_is_valid = previous_buf_is_valid
+  vim.schedule = previous_schedule
+
+  expect.equality(restarted, true)
+  expect.equality(requested_filter, { name = "clangd" })
+  expect.equality(matching_stopped, true)
+  expect.equality(other_stopped, false)
+  expect.equality(starts, {
+    { config = config, bufnr = 11 },
+    { config = config, bufnr = 12 },
+  })
+end
+
+T["complete_reconfigure() closes a successful terminal and restarts clangd"] = function()
+  prepare_case()
+  local esp32 = load_module()
+  reset_plugin_state(esp32)
+
+  local restarted_root
+  local closed = false
+  esp32.restart_clangd = function(root)
+    restarted_root = root
+    return true
+  end
+
+  local completed = esp32.complete_reconfigure("/project/blink", 0, {
+    close = function()
+      closed = true
+    end,
+  })
+
+  expect.equality(completed, true)
+  expect.equality(closed, true)
+  expect.equality(restarted_root, "/project/blink")
+  expect.equality(notifications, {
+    {
+      message = "[ESP32] Reconfigured, restarting clangd.",
+      level = vim.log.levels.INFO,
+    },
+  })
+end
+
+T["complete_reconfigure() keeps a failed terminal open and does not restart clangd"] = function()
+  prepare_case()
+  local esp32 = load_module()
+  reset_plugin_state(esp32)
+
+  local restarted = false
+  local closed = false
+  esp32.restart_clangd = function()
+    restarted = true
+    return true
+  end
+
+  local completed = esp32.complete_reconfigure("/project/blink", 2, {
+    close = function()
+      closed = true
+    end,
+  })
+
+  expect.equality(completed, false)
+  expect.equality(closed, false)
+  expect.equality(restarted, false)
+  expect.equality(notifications, {
+    {
+      message = "[ESP32] Reconfigure failed with exit code 2.\nCheck the terminal output.",
+      level = vim.log.levels.ERROR,
+    },
+  })
+end
+
+T["reconfigure() disables Snacks auto-close until its exit handler runs"] = function()
+  prepare_case()
+  local terminal_opts
+  local autocmd_spec
+  local terminal = { buf = 123 }
+  local esp32 = load_module({
+    terminal = {
+      open = function(_, opts)
+        terminal_opts = opts
+        return terminal
+      end,
+      toggle = function() end,
+    },
+    picker = {
+      pick = function() end,
+      util = {
+        align = function(value)
+          return value
+        end,
+      },
+    },
+  })
+  reset_plugin_state(esp32)
+  esp32.project_root = function()
+    return "/project/blink"
+  end
+
+  local previous_create_autocmd = vim.api.nvim_create_autocmd
+  vim.api.nvim_create_autocmd = function(event, spec)
+    autocmd_spec = vim.tbl_extend("force", { event = event }, spec)
+    return 1
+  end
+
+  esp32.reconfigure()
+
+  vim.api.nvim_create_autocmd = previous_create_autocmd
+
+  expect.equality(terminal_opts.auto_close, false)
+  expect.equality(autocmd_spec.event, "TermClose")
+  expect.equality(autocmd_spec.buffer, 123)
+  expect.equality(autocmd_spec.once, true)
+  expect.equality(type(autocmd_spec.callback), "function")
+end
+
 T["make_idf_command() uses the EIM Python environment when idf.py is a shell function"] = function()
   prepare_case()
   vim.env.IDF_PATH = "/home/test/.espressif/v6.0.1/esp-idf/v6.0.1/esp-idf"

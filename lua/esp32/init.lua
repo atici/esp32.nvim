@@ -418,19 +418,30 @@ function M.restart_clangd(root)
 
   for _, client in ipairs(vim.lsp.get_clients({ name = "clangd" })) do
     if not root or client.root_dir == root then
-      local buffers = vim.lsp.get_buffers_by_client_id(client.id)
-      client:stop()
-      restarted = true
+      local buffers = vim.tbl_keys(client.attached_buffers or {})
+      table.sort(buffers)
 
-      -- Re-attach once the old process is gone; the FileType autocmd is what
-      -- every LSP setup hangs its clangd config off.
-      vim.defer_fn(function()
-        for _, bufnr in ipairs(buffers) do
-          if vim.api.nvim_buf_is_valid(bufnr) then
-            vim.api.nvim_exec_autocmds("FileType", { buffer = bufnr })
+      if client.config and #buffers > 0 then
+        local config = client.config
+        client:stop()
+        restarted = true
+
+        -- stop() marks the old client as stopping synchronously, so start()
+        -- cannot reuse it. The first valid buffer creates the replacement;
+        -- subsequent buffers reuse that client without replaying unrelated
+        -- FileType autocmds or relying on an arbitrary delay.
+        vim.schedule(function()
+          for _, bufnr in ipairs(buffers) do
+            if vim.api.nvim_buf_is_valid(bufnr) then
+              local client_id = vim.lsp.start(config, { bufnr = bufnr })
+              if not client_id then
+                vim.notify("[ESP32] Failed to restart clangd.", vim.log.levels.ERROR)
+                return
+              end
+            end
           end
-        end
-      end, 500)
+        end)
+      end
     end
   end
 
@@ -540,10 +551,35 @@ function M.pick(cmd)
   })
 end
 
---- Run idf.py reconfigure for build.clang
+--- Finish an idf.py reconfigure after its terminal exits
 ---
 --- clangd only reads --compile-commands-dir at startup, so a regenerated build
 --- directory does not reach a running server. Restart it once idf.py succeeds.
+function M.complete_reconfigure(root, status, terminal)
+  if status ~= 0 then
+    vim.notify(
+      "[ESP32] Reconfigure failed with exit code " .. tostring(status) .. ".\nCheck the terminal output.",
+      vim.log.levels.ERROR
+    )
+    return false
+  end
+
+  if terminal and type(terminal.close) == "function" then
+    terminal:close()
+  end
+  vim.cmd.checktime()
+
+  if M.restart_clangd(root) then
+    vim.notify("[ESP32] Reconfigured, restarting clangd.", vim.log.levels.INFO)
+  end
+
+  return true
+end
+
+--- Run idf.py reconfigure for build.clang
+---
+--- Keep the terminal alive until our TermClose handler sees the exit status.
+--- Snacks otherwise removes a successful terminal before later handlers run.
 function M.reconfigure()
   local Snacks = get_snacks()
   local root = M.project_root()
@@ -552,6 +588,7 @@ function M.reconfigure()
   checked_roots = {}
 
   local terminal = Snacks.terminal.open(M.make_idf_command("-D IDF_TOOLCHAIN=clang reconfigure"), {
+    auto_close = false,
     win = {
       width = 0.5,
       height = 0.4,
@@ -569,13 +606,7 @@ function M.reconfigure()
     buffer = bufnr,
     once = true,
     callback = function()
-      if vim.v.event.status ~= 0 then
-        return
-      end
-
-      if M.restart_clangd(root) then
-        vim.notify("[ESP32] Reconfigured, restarting clangd.", vim.log.levels.INFO)
-      end
+      M.complete_reconfigure(root, vim.v.event.status, terminal)
     end,
   })
 end
