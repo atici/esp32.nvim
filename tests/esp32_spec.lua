@@ -366,31 +366,54 @@ T["lsp_config() uses build_dir, root markers, and appends clangd_args"] = functi
   })
 
   local config = esp32.lsp_config()
+  local cmd = esp32.clangd_cmd()
 
-  expect.equality(config.cmd[1], esp32_path)
-  expect_truthy(vim.tbl_contains(config.cmd, "--compile-commands-dir=build.custom"))
-  expect_truthy(vim.tbl_contains(config.cmd, "--function-arg-placeholders=true"))
-  expect_truthy(vim.tbl_contains(config.cmd, "--query-driver=**"))
-  expect_truthy(vim.tbl_contains(config.cmd, "--enable-config"))
+  expect.equality(type(config.cmd), "function")
+  expect.equality(cmd[1], esp32_path)
+  expect_truthy(vim.tbl_contains(cmd, "--compile-commands-dir=build.custom"))
+  expect_truthy(vim.tbl_contains(cmd, "--function-arg-placeholders=true"))
+  expect_truthy(vim.tbl_contains(cmd, "--query-driver=**"))
+  expect_truthy(vim.tbl_contains(cmd, "--enable-config"))
   expect.equality(config.root_markers, { "sdkconfig", "CMakeLists.txt" })
   expect_truthy(config.capabilities ~= nil)
   expect.equality(config.capabilities.general.positionEncodings, { "utf-16" })
 end
 
-T["lsp_config() falls back to system clangd and warns when esp clangd is missing"] = function()
+T["clangd_cmd() falls back to system clangd and warns when esp clangd is missing"] = function()
   prepare_case()
   local esp32 = load_module()
   reset_plugin_state(esp32)
 
-  local config = esp32.lsp_config()
+  local cmd = esp32.clangd_cmd()
 
-  expect.equality(config.cmd[1], "clangd")
+  expect.equality(cmd[1], "clangd")
   expect.equality(#notifications, 1)
   expect.equality(
     notifications[1].message,
     "[ESP32] No esp-clangd found. Falling back to system clangd."
   )
   expect.equality(notifications[1].level, vim.log.levels.WARN)
+end
+
+T["clangd_cmd() stays quiet when only inspecting the command"] = function()
+  prepare_case()
+  local esp32 = load_module()
+  reset_plugin_state(esp32)
+
+  local cmd = esp32.clangd_cmd(nil, { silent = true })
+
+  expect.equality(cmd[1], "clangd")
+  expect.equality(#notifications, 0)
+end
+
+T["clangd_cmd() makes the compile database absolute against a root"] = function()
+  prepare_case()
+  local esp32 = load_module()
+  reset_plugin_state(esp32)
+
+  local cmd = esp32.clangd_cmd("/project/blink", { silent = true })
+
+  expect_truthy(vim.tbl_contains(cmd, "--compile-commands-dir=/project/blink/build.clang"))
 end
 
 T["setup() merges options and warns when esp clangd is missing"] = function()
@@ -422,10 +445,9 @@ T["ensure_compile_commands() warns when compile_commands.json is missing"] = fun
   esp32.ensure_compile_commands()
 
   expect.equality(#notifications, 1)
-  expect.equality(
-    notifications[1].message,
-    "[ESP32] ⚠️ Missing compile_commands.json in build.missing/compile_commands.json"
-  )
+  expect_truthy(notifications[1].message:match("Missing compile_commands%.json in build%.missing/compile_commands%.json"))
+  -- Regenerating alone is not enough: clangd already discarded the flag.
+  expect_truthy(notifications[1].message:match("restarts clangd"))
   expect.equality(notifications[1].level, vim.log.levels.WARN)
 end
 
@@ -445,6 +467,86 @@ T["compile_commands_toolchain() recognises a clang database"] = function()
   set_compile_commands("/opt/espressif/esp-clang/bin/clang")
 
   expect.equality(esp32.compile_commands_toolchain(), "clang")
+end
+
+T["classify_compiler() recognises the GCC variants ESP-IDF produces"] = function()
+  prepare_case()
+  local esp32 = load_module()
+  reset_plugin_state(esp32)
+
+  local gcc = {
+    "/opt/esp/bin/xtensa-esp32-elf-gcc -c main.c",
+    "/opt/esp/bin/xtensa-esp32-elf-g++ -c main.cpp",
+    "/opt/esp/bin/riscv32-esp-elf-gcc -c main.c",
+    "gcc -c main.c",
+    "gcc.exe -c main.c",
+    "/usr/bin/cc -c main.c",
+    -- ESP-IDF puts ccache in front of the compiler when it is available.
+    "/usr/bin/ccache /opt/esp/bin/xtensa-esp32-elf-gcc -c main.c",
+    "sccache gcc -c main.c",
+    -- Windows toolchain paths containing spaces arrive quoted.
+    '"C:/Program Files/esp/xtensa-esp32-elf-gcc.exe" -c main.c',
+  }
+
+  for _, command in ipairs(gcc) do
+    expect.equality(esp32.classify_compiler(command), "gcc")
+  end
+end
+
+T["classify_compiler() recognises the clang variants"] = function()
+  prepare_case()
+  local esp32 = load_module()
+  reset_plugin_state(esp32)
+
+  local clang = {
+    "/opt/esp/esp-clang/bin/clang -c main.c",
+    "/opt/esp/esp-clang/bin/clang++ -c main.cpp",
+    "clang.exe -c main.c",
+    "ccache /opt/esp/esp-clang/bin/clang -c main.c",
+    '"C:/Program Files/esp/clang.exe" -c main.c',
+  }
+
+  for _, command in ipairs(clang) do
+    expect.equality(esp32.classify_compiler(command), "clang")
+  end
+end
+
+T["classify_compiler() accepts the arguments list form"] = function()
+  prepare_case()
+  local esp32 = load_module()
+  reset_plugin_state(esp32)
+
+  expect.equality(
+    esp32.classify_compiler({ "/opt/esp/bin/xtensa-esp32-elf-gcc", "-c", "main.c" }),
+    "gcc"
+  )
+  expect.equality(esp32.classify_compiler({ "ccache", "clang", "-c", "main.c" }), "clang")
+  expect.equality(esp32.classify_compiler({}), nil)
+  expect.equality(esp32.classify_compiler(nil), nil)
+  expect.equality(esp32.classify_compiler("/opt/rustc -c main.rs"), nil)
+end
+
+T["compile_commands_toolchain() reads a quoted Windows compiler path"] = function()
+  prepare_case()
+  local esp32 = load_module()
+  reset_plugin_state(esp32)
+
+  vim.fn.filereadable = function(path)
+    return path:match("compile_commands%.json$") and 1 or 0
+  end
+  vim.fn.readfile = function()
+    return {
+      "[",
+      "{",
+      '  "directory": "C:/project/build.clang",',
+      '  "command": "\\"C:/Program Files/esp/xtensa-esp32-elf-gcc.exe\\" -c main.c",',
+      '  "file": "C:/project/main.c"',
+      "}",
+      "]",
+    }
+  end
+
+  expect.equality(esp32.compile_commands_toolchain(), "gcc")
 end
 
 T["compile_commands_toolchain() returns nil without a database"] = function()
@@ -639,7 +741,8 @@ T["info() reports idf.py available when an EIM Python command can be resolved"] 
   expect.equality(#notifications, 1)
   expect.equality(notifications[1].message, table.concat({
     "✗ ESP-specific clangd missing",
-    "✗ compile_commands.json missing",
+    "✗ compile_commands.json missing in build.clang/compile_commands.json",
+    "clangd: clangd --compile-commands-dir=build.clang --background-index --clang-tidy --header-insertion=iwyu --completion-style=detailed --function-arg-placeholders=true --fallback-style=llvm",
     "✓ idf.py",
     "✗ llvm-ar",
     "IDF_PATH: /home/test/.espressif/v6.0.1/esp-idf/v6.0.1/esp-idf",
@@ -671,6 +774,15 @@ T["info() reports project and environment status"] = function()
     end
     return 0
   end
+  vim.fn.readfile = function()
+    return {
+      "[",
+      "{",
+      '  "command": "/opt/espressif/esp-clang/bin/clang -c main.c"',
+      "}",
+      "]",
+    }
+  end
   vim.env.IDF_PATH = "/opt/esp-idf"
 
   local esp32 = load_module()
@@ -682,6 +794,7 @@ T["info() reports project and environment status"] = function()
   expect.equality(notifications[1].message, table.concat({
     "✓ Found esp-clangd",
     "✓ compile_commands.json exists",
+    "clangd: /opt/espressif/clangd --compile-commands-dir=build.clang --background-index --clang-tidy --header-insertion=iwyu --completion-style=detailed --function-arg-placeholders=true --fallback-style=llvm",
     "✓ idf.py",
     "✓ llvm-ar",
     "IDF_PATH: /opt/esp-idf",
@@ -698,7 +811,8 @@ T["info() suggests EIM and manual activation when ESP-IDF is not active"] = func
   expect.equality(notifications[1].level, vim.log.levels.INFO)
   expect.equality(notifications[1].message, table.concat({
     "✗ ESP-specific clangd missing",
-    "✗ compile_commands.json missing",
+    "✗ compile_commands.json missing in build.clang/compile_commands.json",
+    "clangd: clangd --compile-commands-dir=build.clang --background-index --clang-tidy --header-insertion=iwyu --completion-style=detailed --function-arg-placeholders=true --fallback-style=llvm",
     "✗ idf.py",
     "✗ llvm-ar",
     "IDF_PATH: ✗ not set",
@@ -726,7 +840,8 @@ T["info() suggests the PowerShell profile on Windows when ESP-IDF is not active"
   expect.equality(#notifications, 1)
   expect.equality(notifications[1].message, table.concat({
     "✗ ESP-specific clangd missing",
-    "✗ compile_commands.json missing",
+    "✗ compile_commands.json missing in build.clang/compile_commands.json",
+    "clangd: clangd --compile-commands-dir=build.clang --background-index --clang-tidy --header-insertion=iwyu --completion-style=detailed --function-arg-placeholders=true --fallback-style=llvm",
     "✗ idf.py",
     "✗ llvm-ar",
     "IDF_PATH: ✗ not set",

@@ -184,9 +184,15 @@ The plugin defines the user commands above automatically. When installed through
   and warns once if `compile_commands.json` is missing, or if it was generated
   for the GCC toolchain. The latter happens when a project is built before
   `:ESPReconfigure` has run: clangd then reports ESP-IDF's GCC flags as unknown
-  arguments and cannot find headers such as `sys/features.h`. `:ESPReconfigure`
-  regenerates the build directory with `IDF_TOOLCHAIN=clang` and clears both
-  warnings.
+  arguments and cannot find headers such as `sys/features.h`.
+- `:ESPReconfigure` regenerates the build directory with `IDF_TOOLCHAIN=clang`
+  and then restarts clangd. The restart matters: clangd reads
+  `--compile-commands-dir` only at startup and discards it when the directory
+  does not exist yet, so a server started before the first reconfigure keeps
+  ignoring the build directory until it is started again.
+- ESP-IDF commands and the checks above act on the project root, resolved from
+  the attached clangd client or by searching upwards for `sdkconfig` /
+  `CMakeLists.txt`, so they work when Neovim was started outside the project.
 
 ---
 

@@ -205,23 +205,33 @@ function M.resolve_idf_cmd()
   return "idf.py"
 end
 
---- Create an idf.py command line
-function M.make_idf_command(cmd, port)
-  local full_cmd = M.resolve_idf_cmd() .. " -B " .. shellescape(M.options.build_dir)
-  local selected_port = port or M.state.last_port
+--- Root markers of an ESP-IDF project, most specific first
+local root_markers = { "sdkconfig", "CMakeLists.txt" }
 
-  if selected_port then
-    full_cmd = full_cmd .. " -p " .. shellescape(selected_port)
+--- Resolve the ESP-IDF project a buffer belongs to
+---
+--- Prefers the root an attached clangd resolved, so commands act on the same
+--- project the LSP does, and falls back to searching upwards for a marker.
+--- Returns nil when nothing looks like a project, leaving callers on Neovim's
+--- working directory.
+function M.project_root(bufnr)
+  bufnr = bufnr or vim.api.nvim_get_current_buf()
+
+  for _, client in ipairs(vim.lsp.get_clients({ name = "clangd", bufnr = bufnr })) do
+    if client.root_dir then
+      return client.root_dir
+    end
   end
 
-  return full_cmd .. " " .. cmd
+  local name = vim.api.nvim_buf_get_name(bufnr)
+  return vim.fs.root(name ~= "" and name or vim.fn.getcwd(), root_markers)
 end
 
---- Locate the compile database, resolving build_dir against a project root
+--- Resolve build_dir against a project root
 ---
 --- build_dir is relative by default, and Neovim's working directory is not
---- necessarily the project, so prefer the root clangd itself resolved against.
-local function compile_commands_path(root)
+--- necessarily the project, so anything that has a root should pass it.
+local function build_dir_for(root)
   local dir = M.options.build_dir
   local is_absolute = dir:match("^[/\\]") or dir:match("^%a:[/\\]")
 
@@ -229,7 +239,119 @@ local function compile_commands_path(root)
     dir = join_path(root, dir)
   end
 
-  return join_path(dir, "compile_commands.json")
+  return dir
+end
+
+--- Locate the compile database of a project
+local function compile_commands_path(root)
+  return join_path(build_dir_for(root), "compile_commands.json")
+end
+
+--- Create an idf.py command line
+---
+--- The terminal inherits Neovim's working directory, which is not necessarily
+--- the project, so point idf.py at the resolved root with -C when there is one.
+function M.make_idf_command(cmd, port)
+  local root = M.project_root()
+  local full_cmd = M.resolve_idf_cmd()
+
+  if root then
+    full_cmd = full_cmd .. " -C " .. shellescape(root)
+  end
+
+  full_cmd = full_cmd .. " -B " .. shellescape(build_dir_for(root))
+
+  local selected_port = port or M.state.last_port
+  if selected_port then
+    full_cmd = full_cmd .. " -p " .. shellescape(selected_port)
+  end
+
+  return full_cmd .. " " .. cmd
+end
+
+--- Build systems prefix the real compiler with these, so skip past them
+local compiler_launchers = {
+  ccache = true,
+  sccache = true,
+  distcc = true,
+  icecc = true,
+  buildcache = true,
+}
+
+--- Split a command line into arguments, honouring quoted paths
+---
+--- Windows toolchain paths contain spaces often enough that splitting on
+--- whitespace alone misreads the compiler.
+local function split_command(command)
+  local args = {}
+  local index = 1
+
+  while index <= #command do
+    local char = command:sub(index, index)
+
+    if char == " " or char == "\t" then
+      index = index + 1
+    elseif char == '"' then
+      local closing = command:find('"', index + 1, true)
+      if not closing then
+        break
+      end
+      table.insert(args, command:sub(index + 1, closing - 1))
+      index = closing + 1
+    else
+      local stop = command:find("[ \t]", index) or (#command + 1)
+      table.insert(args, command:sub(index, stop - 1))
+      index = stop
+    end
+  end
+
+  return args
+end
+
+--- Reduce a compiler path to a comparable basename
+local function compiler_name(path)
+  local name = path:match("([^/\\]+)$") or path
+  return name:gsub("%.exe$", ""):lower()
+end
+
+--- Classify the compiler of a compile database entry
+---
+--- Accepts either the "command" string or the "arguments" list of an entry.
+--- Returns "clang", "gcc", or nil when the name is not recognised.
+function M.classify_compiler(command)
+  local args
+  if type(command) == "table" then
+    args = command
+  elseif type(command) == "string" and command ~= "" then
+    args = split_command(command)
+  else
+    return nil
+  end
+
+  local index = 1
+
+  -- ESP-IDF enables ccache when it is available, which puts the launcher
+  -- rather than the compiler in the first position.
+  while args[index] and compiler_launchers[compiler_name(args[index])] do
+    index = index + 1
+  end
+
+  local name = args[index] and compiler_name(args[index])
+  if not name then
+    return nil
+  end
+
+  if name:match("clang%+?%+?$") then
+    return "clang"
+  end
+
+  -- Covers xtensa-esp32-elf-gcc, riscv32-esp-elf-g++, plain gcc/g++ and the
+  -- cc/c++ aliases.
+  if name:match("g?cc$") or name:match("g?%+%+$") then
+    return "gcc"
+  end
+
+  return nil
 end
 
 --- Identify the compiler a compile database was generated for
@@ -245,31 +367,35 @@ function M.compile_commands_toolchain(root)
   end
 
   -- The database grows with the project, so read only far enough to reach the
-  -- compiler of the first entry rather than loading the whole file.
+  -- first entry rather than loading the whole file, then let the JSON decoder
+  -- deal with escaping instead of matching quotes by hand.
   local head = table.concat(vim.fn.readfile(path, "", 40), "\n")
-  local compiler = head:match('"command"%s*:%s*"([^"%s]+)')
-    or head:match('"arguments"%s*:%s*%[%s*"([^"]+)"')
-
-  if not compiler then
+  local entry = head:match("%b{}")
+  if not entry then
     return nil
   end
 
-  if compiler:match("%-gcc") then
-    return "gcc"
+  local ok, decoded = pcall(vim.json.decode, entry)
+  if not ok or type(decoded) ~= "table" then
+    return nil
   end
 
-  if compiler:match("clang") then
-    return "clang"
-  end
-
-  return nil
+  return M.classify_compiler(decoded.arguments or decoded.command)
 end
 
 --- Ensure compile_commands.json exists and was generated for clang
 function M.ensure_compile_commands(root)
   local path = compile_commands_path(root)
   if vim.fn.filereadable(path) == 0 then
-    vim.notify("[ESP32] ⚠️ Missing compile_commands.json in " .. path, vim.log.levels.WARN)
+    -- clangd drops --compile-commands-dir at startup when the directory is
+    -- absent ("The argument will be ignored"), so creating it later is not
+    -- enough on its own: the server has to be started again.
+    vim.notify(
+      "[ESP32] ⚠️ Missing compile_commands.json in " .. path
+        .. "\nclangd has already discarded the build directory for this session."
+        .. "\nRun :ESPReconfigure, which regenerates it and restarts clangd.",
+      vim.log.levels.WARN
+    )
     return
   end
 
@@ -281,6 +407,34 @@ function M.ensure_compile_commands(root)
       vim.log.levels.WARN
     )
   end
+end
+
+--- Restart the clangd clients of a project
+---
+--- Used after the build directory changes, because clangd only reads
+--- --compile-commands-dir at startup.
+function M.restart_clangd(root)
+  local restarted = false
+
+  for _, client in ipairs(vim.lsp.get_clients({ name = "clangd" })) do
+    if not root or client.root_dir == root then
+      local buffers = vim.lsp.get_buffers_by_client_id(client.id)
+      client:stop()
+      restarted = true
+
+      -- Re-attach once the old process is gone; the FileType autocmd is what
+      -- every LSP setup hangs its clangd config off.
+      vim.defer_fn(function()
+        for _, bufnr in ipairs(buffers) do
+          if vim.api.nvim_buf_is_valid(bufnr) then
+            vim.api.nvim_exec_autocmds("FileType", { buffer = bufnr })
+          end
+        end
+      end, 500)
+    end
+  end
+
+  return restarted
 end
 
 --- Projects already reported on, so one bad build dir warns once per session
@@ -387,11 +541,17 @@ function M.pick(cmd)
 end
 
 --- Run idf.py reconfigure for build.clang
+---
+--- clangd only reads --compile-commands-dir at startup, so a regenerated build
+--- directory does not reach a running server. Restart it once idf.py succeeds.
 function M.reconfigure()
   local Snacks = get_snacks()
+  local root = M.project_root()
+
   -- The build dir is about to change, so let it be reported on again.
   checked_roots = {}
-  Snacks.terminal.open(M.make_idf_command("-D IDF_TOOLCHAIN=clang reconfigure"), {
+
+  local terminal = Snacks.terminal.open(M.make_idf_command("-D IDF_TOOLCHAIN=clang reconfigure"), {
     win = {
       width = 0.5,
       height = 0.4,
@@ -399,18 +559,46 @@ function M.reconfigure()
       title_pos = "center",
     },
   })
+
+  local bufnr = type(terminal) == "table" and terminal.buf
+  if not bufnr then
+    return
+  end
+
+  vim.api.nvim_create_autocmd("TermClose", {
+    buffer = bufnr,
+    once = true,
+    callback = function()
+      if vim.v.event.status ~= 0 then
+        return
+      end
+
+      if M.restart_clangd(root) then
+        vim.notify("[ESP32] Reconfigured, restarting clangd.", vim.log.levels.INFO)
+      end
+    end,
+  })
 end
 
---- Set up ESP32 LSP configuration
-function M.lsp_config()
+--- Build the clangd command for a project root
+---
+--- Public so the resolved command stays inspectable: lsp_config() passes cmd as
+--- a function, which :checkhealth reports only as <function>.
+function M.clangd_cmd(root, opts)
   local clangd = M.find_esp_clangd()
   if not clangd then
-    vim.notify("[ESP32] No esp-clangd found. Falling back to system clangd.", vim.log.levels.WARN)
+    -- Reporting belongs to starting a server, not to inspecting the command.
+    if not (opts and opts.silent) then
+      vim.notify("[ESP32] No esp-clangd found. Falling back to system clangd.", vim.log.levels.WARN)
+    end
     clangd = "clangd"
   end
+
   local cmd = {
     clangd,
-    "--compile-commands-dir=" .. M.options.build_dir,
+    -- Absolute where a root is known: clangd resolves this against its own
+    -- working directory, which Neovim documents as unrelated to root_dir.
+    "--compile-commands-dir=" .. build_dir_for(root),
     "--background-index",
     "--clang-tidy",
     "--header-insertion=iwyu",
@@ -422,11 +610,27 @@ function M.lsp_config()
 
   vim.list_extend(cmd, M.options.clangd_args or {})
 
+  return cmd
+end
+
+--- Set up ESP32 LSP configuration
+function M.lsp_config()
   return {
-    cmd = cmd,
+    -- A function rather than a list so the build directory can be resolved
+    -- against the project root, which is only known once a client is created
+    -- for it. Same shape as nvim-lspconfig's own jsonls and ruby_lsp configs.
+    cmd = function(dispatchers, config)
+      local root = config and config.root_dir
+
+      return vim.lsp.rpc.start(M.clangd_cmd(root), dispatchers, {
+        cwd = (config and config.cmd_cwd) or root,
+        env = config and config.cmd_env,
+        detached = config and config.detached,
+      })
+    end,
     -- Prefer the ESP-IDF project root and avoid falling back to a parent git
     -- repository, which breaks nested projects/monorepos.
-    root_markers = { "sdkconfig", "CMakeLists.txt" },
+    root_markers = root_markers,
     capabilities = make_clangd_capabilities(),
     init_options = {
       usePlaceholders = true,
@@ -447,19 +651,25 @@ function M.info()
     table.insert(messages, "✗ ESP-specific clangd missing")
   end
 
-  -- compile_commands.json check
-  local build_dir = M.options.build_dir
-  local path = build_dir .. "/compile_commands.json"
+  -- compile_commands.json check, against the same project the LSP uses
+  local root = M.project_root()
+  local path = compile_commands_path(root)
   if vim.fn.filereadable(path) == 1 then
-    local toolchain = M.compile_commands_toolchain()
-    if toolchain == "gcc" then
+    local toolchain = M.compile_commands_toolchain(root)
+    if toolchain == "clang" then
+      table.insert(messages, "✓ compile_commands.json exists")
+    elseif toolchain == "gcc" then
       table.insert(messages, "✗ compile_commands.json was generated for GCC, run :ESPReconfigure")
     else
-      table.insert(messages, "✓ compile_commands.json exists")
+      -- Unrecognised is not the same as healthy; say so rather than imply a
+      -- clang database.
+      table.insert(messages, "? compile_commands.json exists, unrecognised compiler")
     end
   else
-    table.insert(messages, "✗ compile_commands.json missing")
+    table.insert(messages, "✗ compile_commands.json missing in " .. path)
   end
+
+  table.insert(messages, "clangd: " .. table.concat(M.clangd_cmd(root, { silent = true }), " "))
 
   -- Check ESP-IDF environment
   local function check_bin(bin)
