@@ -217,11 +217,54 @@ function M.make_idf_command(cmd, port)
   return full_cmd .. " " .. cmd
 end
 
---- Ensure compile_commands.json exists
+--- Identify the compiler a compile database was generated for
+---
+--- Returns "clang", "gcc", or nil when the database is missing or the compiler
+--- cannot be recognised. A database written for the GCC toolchain drives clangd
+--- into reporting unknown arguments and missing headers, because the ESP-IDF
+--- GCC flags and newlib headers have no clang equivalent.
+function M.compile_commands_toolchain()
+  local path = join_path(M.options.build_dir, "compile_commands.json")
+  if vim.fn.filereadable(path) == 0 then
+    return nil
+  end
+
+  -- The database grows with the project, so read only far enough to reach the
+  -- compiler of the first entry rather than loading the whole file.
+  local head = table.concat(vim.fn.readfile(path, "", 40), "\n")
+  local compiler = head:match('"command"%s*:%s*"([^"%s]+)')
+    or head:match('"arguments"%s*:%s*%[%s*"([^"]+)"')
+
+  if not compiler then
+    return nil
+  end
+
+  if compiler:match("%-gcc") then
+    return "gcc"
+  end
+
+  if compiler:match("clang") then
+    return "clang"
+  end
+
+  return nil
+end
+
+--- Ensure compile_commands.json exists and was generated for clang
 function M.ensure_compile_commands()
-  local path = M.options.build_dir .. "/compile_commands.json"
+  local path = join_path(M.options.build_dir, "compile_commands.json")
   if vim.fn.filereadable(path) == 0 then
     vim.notify("[ESP32] ⚠️ Missing compile_commands.json in " .. path, vim.log.levels.WARN)
+    return
+  end
+
+  if M.compile_commands_toolchain() == "gcc" then
+    vim.notify(
+      "[ESP32] ⚠️ " .. path .. " was generated for the GCC toolchain."
+        .. "\nclangd will report unknown arguments and missing headers."
+        .. "\nRun :ESPReconfigure to regenerate it with IDF_TOOLCHAIN=clang.",
+      vim.log.levels.WARN
+    )
   end
 end
 
@@ -325,7 +368,8 @@ function M.lsp_config()
     "--clang-tidy",
     "--header-insertion=iwyu",
     "--completion-style=detailed",
-    "--function-arg-placeholders",
+    -- clangd 20 rejects the bare flag and wants an explicit boolean.
+    "--function-arg-placeholders=true",
     "--fallback-style=llvm",
   }
 
@@ -360,7 +404,12 @@ function M.info()
   local build_dir = M.options.build_dir
   local path = build_dir .. "/compile_commands.json"
   if vim.fn.filereadable(path) == 1 then
-    table.insert(messages, "✓ compile_commands.json exists")
+    local toolchain = M.compile_commands_toolchain()
+    if toolchain == "gcc" then
+      table.insert(messages, "✗ compile_commands.json was generated for GCC, run :ESPReconfigure")
+    else
+      table.insert(messages, "✓ compile_commands.json exists")
+    end
   else
     table.insert(messages, "✗ compile_commands.json missing")
   end

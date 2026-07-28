@@ -109,7 +109,28 @@ local function prepare_case()
   vim.fn.expand = function()
     return "/home/test"
   end
+  vim.fn.readfile = function()
+    return {}
+  end
   set_scandir({})
+end
+
+--- Present a compile_commands.json whose first entry uses the given compiler
+local function set_compile_commands(compiler)
+  vim.fn.filereadable = function(path)
+    return path:match("compile_commands%.json$") and 1 or 0
+  end
+  vim.fn.readfile = function()
+    return {
+      "[",
+      "{",
+      '  "directory": "/project/build.clang",',
+      '  "command": "' .. compiler .. ' -DFOO -Iinclude -c main.c",',
+      '  "file": "/project/main/main.c"',
+      "}",
+      "]",
+    }
+  end
 end
 
 T.hooks = {
@@ -120,6 +141,7 @@ T.hooks = {
     original_fn.exepath = vim.fn.exepath
     original_fn.filereadable = vim.fn.filereadable
     original_fn.expand = vim.fn.expand
+    original_fn.readfile = vim.fn.readfile
     original_uv.fs_scandir = vim.uv.fs_scandir
     original_uv.fs_scandir_next = vim.uv.fs_scandir_next
   end,
@@ -136,6 +158,7 @@ T.hooks = {
     vim.fn.exepath = original_fn.exepath
     vim.fn.filereadable = original_fn.filereadable
     vim.fn.expand = original_fn.expand
+    vim.fn.readfile = original_fn.readfile
     vim.uv.fs_scandir = original_uv.fs_scandir
     vim.uv.fs_scandir_next = original_uv.fs_scandir_next
   end,
@@ -346,6 +369,7 @@ T["lsp_config() uses build_dir, root markers, and appends clangd_args"] = functi
 
   expect.equality(config.cmd[1], esp32_path)
   expect_truthy(vim.tbl_contains(config.cmd, "--compile-commands-dir=build.custom"))
+  expect_truthy(vim.tbl_contains(config.cmd, "--function-arg-placeholders=true"))
   expect_truthy(vim.tbl_contains(config.cmd, "--query-driver=**"))
   expect_truthy(vim.tbl_contains(config.cmd, "--enable-config"))
   expect.equality(config.root_markers, { "sdkconfig", "CMakeLists.txt" })
@@ -403,6 +427,57 @@ T["ensure_compile_commands() warns when compile_commands.json is missing"] = fun
     "[ESP32] ⚠️ Missing compile_commands.json in build.missing/compile_commands.json"
   )
   expect.equality(notifications[1].level, vim.log.levels.WARN)
+end
+
+T["compile_commands_toolchain() recognises a GCC database"] = function()
+  prepare_case()
+  local esp32 = load_module()
+  reset_plugin_state(esp32)
+  set_compile_commands("/opt/espressif/bin/xtensa-esp32-elf-gcc")
+
+  expect.equality(esp32.compile_commands_toolchain(), "gcc")
+end
+
+T["compile_commands_toolchain() recognises a clang database"] = function()
+  prepare_case()
+  local esp32 = load_module()
+  reset_plugin_state(esp32)
+  set_compile_commands("/opt/espressif/esp-clang/bin/clang")
+
+  expect.equality(esp32.compile_commands_toolchain(), "clang")
+end
+
+T["compile_commands_toolchain() returns nil without a database"] = function()
+  prepare_case()
+  local esp32 = load_module()
+  reset_plugin_state(esp32)
+
+  expect.equality(esp32.compile_commands_toolchain(), nil)
+end
+
+T["ensure_compile_commands() warns when the database was generated for GCC"] = function()
+  prepare_case()
+  local esp32 = load_module()
+  reset_plugin_state(esp32)
+  set_compile_commands("/opt/espressif/bin/riscv32-esp-elf-gcc")
+
+  esp32.ensure_compile_commands()
+
+  expect.equality(#notifications, 1)
+  expect_truthy(notifications[1].message:match("generated for the GCC toolchain"))
+  expect_truthy(notifications[1].message:match("ESPReconfigure"))
+  expect.equality(notifications[1].level, vim.log.levels.WARN)
+end
+
+T["ensure_compile_commands() stays quiet for a clang database"] = function()
+  prepare_case()
+  local esp32 = load_module()
+  reset_plugin_state(esp32)
+  set_compile_commands("/opt/espressif/esp-clang/bin/clang")
+
+  esp32.ensure_compile_commands()
+
+  expect.equality(#notifications, 0)
 end
 
 T["make_idf_command() uses the EIM Python environment when idf.py is a shell function"] = function()
