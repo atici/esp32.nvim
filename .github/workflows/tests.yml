@@ -9,6 +9,11 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        neovim:
+          - v0.11.4
+          - stable
 
     steps:
       - name: Check out repository
@@ -18,7 +23,7 @@ jobs:
         uses: rhysd/action-setup-vim@v1
         with:
           neovim: true
-          version: stable
+          version: ${{ matrix.neovim }}
 
       - name: Check Neovim version
         run: nvim --version
