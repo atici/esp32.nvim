@@ -217,14 +217,29 @@ function M.make_idf_command(cmd, port)
   return full_cmd .. " " .. cmd
 end
 
+--- Locate the compile database, resolving build_dir against a project root
+---
+--- build_dir is relative by default, and Neovim's working directory is not
+--- necessarily the project, so prefer the root clangd itself resolved against.
+local function compile_commands_path(root)
+  local dir = M.options.build_dir
+  local is_absolute = dir:match("^[/\\]") or dir:match("^%a:[/\\]")
+
+  if root and not is_absolute then
+    dir = join_path(root, dir)
+  end
+
+  return join_path(dir, "compile_commands.json")
+end
+
 --- Identify the compiler a compile database was generated for
 ---
 --- Returns "clang", "gcc", or nil when the database is missing or the compiler
 --- cannot be recognised. A database written for the GCC toolchain drives clangd
 --- into reporting unknown arguments and missing headers, because the ESP-IDF
 --- GCC flags and newlib headers have no clang equivalent.
-function M.compile_commands_toolchain()
-  local path = join_path(M.options.build_dir, "compile_commands.json")
+function M.compile_commands_toolchain(root)
+  local path = compile_commands_path(root)
   if vim.fn.filereadable(path) == 0 then
     return nil
   end
@@ -251,14 +266,14 @@ function M.compile_commands_toolchain()
 end
 
 --- Ensure compile_commands.json exists and was generated for clang
-function M.ensure_compile_commands()
-  local path = join_path(M.options.build_dir, "compile_commands.json")
+function M.ensure_compile_commands(root)
+  local path = compile_commands_path(root)
   if vim.fn.filereadable(path) == 0 then
     vim.notify("[ESP32] ⚠️ Missing compile_commands.json in " .. path, vim.log.levels.WARN)
     return
   end
 
-  if M.compile_commands_toolchain() == "gcc" then
+  if M.compile_commands_toolchain(root) == "gcc" then
     vim.notify(
       "[ESP32] ⚠️ " .. path .. " was generated for the GCC toolchain."
         .. "\nclangd will report unknown arguments and missing headers."
@@ -267,6 +282,36 @@ function M.ensure_compile_commands()
     )
   end
 end
+
+--- Projects already reported on, so one bad build dir warns once per session
+local checked_roots = {}
+
+--- Check the compile database of a project clangd just attached to
+---
+--- Hooked to LspAttach rather than to opening a buffer because that is where
+--- the resolved project root is available, and because the warnings only
+--- describe how clangd behaves.
+function M.check_attached_client(client_id)
+  local client = vim.lsp.get_client_by_id(client_id)
+  if not client or client.name ~= "clangd" then
+    return
+  end
+
+  local root = client.root_dir
+  if not root or checked_roots[root] then
+    return
+  end
+
+  checked_roots[root] = true
+  M.ensure_compile_commands(root)
+end
+
+vim.api.nvim_create_autocmd("LspAttach", {
+  group = vim.api.nvim_create_augroup("Esp32CheckCompileCommands", { clear = true }),
+  callback = function(args)
+    M.check_attached_client(args.data and args.data.client_id)
+  end,
+})
 
 --- Ensure esp-clangd exists and warn if not
 function M.ensure_clangd()
@@ -344,6 +389,8 @@ end
 --- Run idf.py reconfigure for build.clang
 function M.reconfigure()
   local Snacks = get_snacks()
+  -- The build dir is about to change, so let it be reported on again.
+  checked_roots = {}
   Snacks.terminal.open(M.make_idf_command("-D IDF_TOOLCHAIN=clang reconfigure"), {
     win = {
       width = 0.5,

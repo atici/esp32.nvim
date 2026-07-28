@@ -480,6 +480,65 @@ T["ensure_compile_commands() stays quiet for a clang database"] = function()
   expect.equality(#notifications, 0)
 end
 
+T["compile_commands_toolchain() resolves build_dir against the project root"] = function()
+  prepare_case()
+  local esp32 = load_module()
+  reset_plugin_state(esp32)
+
+  local checked
+  vim.fn.filereadable = function(path)
+    checked = path
+    return 0
+  end
+
+  esp32.compile_commands_toolchain("/project/blink")
+
+  expect.equality(checked, "/project/blink/build.clang/compile_commands.json")
+end
+
+T["compile_commands_toolchain() leaves an absolute build_dir alone"] = function()
+  prepare_case()
+  local esp32 = load_module()
+  reset_plugin_state(esp32)
+  esp32.options.build_dir = "/elsewhere/build"
+
+  local checked
+  vim.fn.filereadable = function(path)
+    checked = path
+    return 0
+  end
+
+  esp32.compile_commands_toolchain("/project/blink")
+
+  expect.equality(checked, "/elsewhere/build/compile_commands.json")
+end
+
+T["LspAttach checks the project clangd attached to, once per root"] = function()
+  prepare_case()
+  local esp32 = load_module()
+  reset_plugin_state(esp32)
+  set_compile_commands("/opt/espressif/bin/xtensa-esp32-elf-gcc")
+
+  local previous_get_client = vim.lsp.get_client_by_id
+  vim.lsp.get_client_by_id = function(id)
+    if id == 1 then
+      return { name = "clangd", root_dir = "/project/blink" }
+    end
+    return { name = "lua_ls", root_dir = "/project/blink" }
+  end
+
+  esp32.check_attached_client(1)
+  esp32.check_attached_client(1)
+  esp32.check_attached_client(2)
+
+  vim.lsp.get_client_by_id = previous_get_client
+
+  -- Same root twice and a non-clangd client must not add more warnings.
+  expect.equality(#notifications, 1)
+  expect_truthy(notifications[1].message:match("generated for the GCC toolchain"))
+  expect_truthy(notifications[1].message:match("^%[ESP32%].*/project/blink/build%.clang"))
+end
+
 T["make_idf_command() uses the EIM Python environment when idf.py is a shell function"] = function()
   prepare_case()
   vim.env.IDF_PATH = "/home/test/.espressif/v6.0.1/esp-idf/v6.0.1/esp-idf"
