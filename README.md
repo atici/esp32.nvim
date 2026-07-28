@@ -1,7 +1,7 @@
 [![Version](https://img.shields.io/github/v/tag/Aietes/esp32.nvim?style=for-the-badge&label=version&sort=semver)](https://github.com/Aietes/esp32.nvim/tags)
 [![Tests](https://img.shields.io/github/actions/workflow/status/Aietes/esp32.nvim/tests.yml?branch=main&style=for-the-badge&label=tests)](https://github.com/Aietes/esp32.nvim/actions/workflows/tests.yml)
 [![Last Commit](https://img.shields.io/github/last-commit/Aietes/esp32.nvim?style=for-the-badge)](https://github.com/Aietes/esp32.nvim/commits/main)
-[![Neovim](https://img.shields.io/badge/Neovim-0.10%2B-57A143?style=for-the-badge&logo=neovim&logoColor=white)](https://neovim.io/)
+[![Neovim](https://img.shields.io/badge/Neovim-0.11%2B-57A143?style=for-the-badge&logo=neovim&logoColor=white)](https://neovim.io/)
 [![License](https://img.shields.io/github/license/Aietes/esp32.nvim?style=for-the-badge)](https://github.com/Aietes/esp32.nvim/blob/main/LICENSE)
 
 **ESP32.nvim** makes working with ESP-IDF projects in Neovim a breeze.
@@ -22,6 +22,7 @@ Uses [snacks.nvim](https://github.com/folke/snacks.nvim) for terminal and picker
 
 ## 🚀 Requirements
 
+- Neovim 0.11 or newer
 - [ESP-IDF](https://github.com/espressif/esp-idf) installed and initialized. The recommended upstream setup is now [ESP-IDF Installation Manager](https://docs.espressif.com/projects/idf-im-ui/en/latest/).
 - ESP-specific `clangd` is installed. With ESP-IDF Installation Manager, include `esp-clang` in the selected tools, or run `idf_tools.py install esp-clang` from an activated ESP-IDF shell.
 - ESP-specific `clangd` is configured via `idf.py -B build.clang -D IDF_TOOLCHAIN=clang reconfigure` (can be done via command `:ESPReconfigure`)
@@ -180,6 +181,19 @@ The plugin defines the user commands above automatically. When installed through
 - You must either:
   - Source an ESP-IDF environment before launching Neovim
   - Or use a project-local Nix/direnv shell to source that environment for you
+- When clangd attaches, the plugin checks the build directory of that project
+  and warns once if `compile_commands.json` is missing, or if it was generated
+  for the GCC toolchain. The latter happens when a project is built before
+  `:ESPReconfigure` has run: clangd then reports ESP-IDF's GCC flags as unknown
+  arguments and cannot find headers such as `sys/features.h`.
+- `:ESPReconfigure` regenerates the build directory with `IDF_TOOLCHAIN=clang`
+  and then restarts clangd. The restart matters: clangd reads
+  `--compile-commands-dir` only at startup and discards it when the directory
+  does not exist yet, so a server started before the first reconfigure keeps
+  ignoring the build directory until it is started again.
+- ESP-IDF commands and the checks above act on the project root, resolved from
+  the attached clangd client or by searching upwards for `sdkconfig` /
+  `CMakeLists.txt`, so they work when Neovim was started outside the project.
 
 ---
 
