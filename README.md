@@ -180,6 +180,13 @@ The plugin defines the user commands above automatically. When installed through
 - You must either:
   - Source an ESP-IDF environment before launching Neovim
   - Or use a project-local Nix/direnv shell to source that environment for you
+- When clangd attaches, the plugin checks the build directory of that project
+  and warns once if `compile_commands.json` is missing, or if it was generated
+  for the GCC toolchain. The latter happens when a project is built before
+  `:ESPReconfigure` has run: clangd then reports ESP-IDF's GCC flags as unknown
+  arguments and cannot find headers such as `sys/features.h`. `:ESPReconfigure`
+  regenerates the build directory with `IDF_TOOLCHAIN=clang` and clears both
+  warnings.
 
 ---
 
