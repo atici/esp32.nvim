@@ -266,28 +266,42 @@ vim.api.nvim_create_user_command("ESPBuild", function()
   M.build()
 end, {})
 
-function M.get_targets()
-  -- get targets from idf.py
-  local cmd =  M.make_idf_command("--list-targets");
-  local str = vim.fn.system(cmd);
-  -- check if we found what we're looking for
-  if not str:match("esp32") then
-    return
+--- Extract target names from `idf.py --list-targets` output
+function M.parse_targets(output)
+  local items = {}
+
+  -- idf.py checks its environment before parsing arguments and reports
+  -- problems on stderr, which vim.fn.system() merges into the output. Only
+  -- keep lines that are a bare target name so warnings never reach the picker
+  -- or, via confirm(), the shell.
+  for line in (output or ""):gmatch("[^\r\n]+") do
+    local target = line:match("^%s*(esp%w+)%s*$")
+    if target then
+      table.insert(items, { text = target })
+    end
   end
 
-  local items = {}
-  for line in str:gmatch("[^\r\n]+") do
-    table.insert(items, { text = line })
+  if #items == 0 then
+    return nil
   end
+
   return items
 end
 
+--- List the targets supported by the installed ESP-IDF
+function M.get_targets()
+  local cmd = M.resolve_idf_cmd() .. " --list-targets"
+  return M.parse_targets(vim.fn.system(cmd))
+end
+
+--- Pick a target and run idf.py set-target
 function M.set_target()
-  -- targets is global so we dont have to check it every time.
+  -- Cached for the session: the target list only changes with the ESP-IDF
+  -- install, and querying it starts a full idf.py.
   if not targets then
     targets = M.get_targets()
     if not targets then
-      vim.notify("[ESP32] No targets found.", vim.log.levels.WARN);
+      vim.notify("[ESP32] No targets found.", vim.log.levels.WARN)
       return
     end
   end

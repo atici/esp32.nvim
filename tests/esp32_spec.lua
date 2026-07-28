@@ -20,6 +20,7 @@ local function reset_module()
   restore_command("ESPBuild")
   restore_command("ESPReconfigure")
   restore_command("ESPInfo")
+  restore_command("ESPSetTarget")
   package.loaded["esp32"] = nil
   package.loaded["snacks"] = nil
 end
@@ -611,6 +612,7 @@ T["module load registers user commands"] = function()
   expect_truthy(commands.ESPBuild ~= nil)
   expect_truthy(commands.ESPReconfigure ~= nil)
   expect_truthy(commands.ESPInfo ~= nil)
+  expect_truthy(commands.ESPSetTarget ~= nil)
 end
 
 T["command() reuses the last selected port and toggles monitor sessions"] = function()
@@ -678,6 +680,108 @@ T["pick() stores the selected port and runs the command with it"] = function()
   expect.equality(esp32.state.last_port, "/dev/ttyACM0")
   expect.equality(calls[1].method, "toggle")
   expect.equality(calls[1].cmd, "idf.py -B 'build.clang' -p '/dev/ttyACM0' monitor")
+end
+
+T["parse_targets() keeps target names and drops idf.py diagnostics"] = function()
+  prepare_case()
+  local esp32 = load_module()
+  reset_plugin_state(esp32)
+
+  -- idf.py reports environment problems on stderr, which vim.fn.system()
+  -- merges into the output it returns.
+  local targets = esp32.parse_targets(table.concat({
+    "WARNING: The IDF_PYTHON_ENV_PATH is missing in environmental variables!",
+    "Setting IDF_PATH environment variable: /home/test/esp32-project/esp-idf",
+    "esp32",
+    "esp32s3",
+    "esp32c61",
+  }, "\n"))
+
+  expect.equality(#targets, 3)
+  expect.equality(targets[1].text, "esp32")
+  expect.equality(targets[2].text, "esp32s3")
+  expect.equality(targets[3].text, "esp32c61")
+end
+
+T["parse_targets() returns nil when no target survives"] = function()
+  prepare_case()
+  local esp32 = load_module()
+  reset_plugin_state(esp32)
+
+  expect.equality(esp32.parse_targets(""), nil)
+  -- A failure that merely mentions a target name is not a target list.
+  expect.equality(esp32.parse_targets("ERROR: unsupported target esp32c6 in sdkconfig"), nil)
+end
+
+T["set_target() runs set-target for the picked target"] = function()
+  prepare_case()
+  local picker_spec
+  local calls = {}
+  local esp32 = load_module({
+    terminal = {
+      open = function(cmd, opts)
+        table.insert(calls, { method = "open", cmd = cmd, opts = opts })
+      end,
+      toggle = function(cmd, opts)
+        table.insert(calls, { method = "toggle", cmd = cmd, opts = opts })
+      end,
+    },
+    picker = {
+      pick = function(spec)
+        picker_spec = spec
+      end,
+      util = {
+        align = function(value)
+          return value
+        end,
+      },
+    },
+  })
+
+  reset_plugin_state(esp32)
+  vim.fn.system = function()
+    return "esp32\nesp32s3\n"
+  end
+
+  esp32.set_target()
+  expect.equality(#picker_spec.items, 2)
+
+  picker_spec.confirm({ close = function() end }, { text = "esp32s3" })
+
+  expect.equality(calls[1].method, "open")
+  expect.equality(calls[1].cmd, "idf.py -B 'build.clang' set-target esp32s3")
+end
+
+T["set_target() warns and skips the picker when no targets are found"] = function()
+  prepare_case()
+  local picked = false
+  local esp32 = load_module({
+    terminal = {
+      open = function() end,
+      toggle = function() end,
+    },
+    picker = {
+      pick = function()
+        picked = true
+      end,
+      util = {
+        align = function(value)
+          return value
+        end,
+      },
+    },
+  })
+
+  reset_plugin_state(esp32)
+  vim.fn.system = function()
+    return "idf.py: command not found\n"
+  end
+
+  esp32.set_target()
+
+  expect.equality(picked, false)
+  expect.equality(#notifications, 1)
+  expect_truthy(notifications[1].message:match("No targets found"))
 end
 
 T["lazy.lua packaged spec exposes expected defaults"] = function()
