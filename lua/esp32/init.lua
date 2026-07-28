@@ -270,10 +270,9 @@ end, {})
 function M.parse_targets(output)
   local items = {}
 
-  -- idf.py checks its environment before parsing arguments and reports
-  -- problems on stderr, which vim.fn.system() merges into the output. Only
-  -- keep lines that are a bare target name so warnings never reach the picker
-  -- or, via confirm(), the shell.
+  -- idf.py prints more than the target list on stdout, so only keep lines that
+  -- are a bare target name. Anything else would become a picker entry and, via
+  -- confirm(), reach the shell unescaped.
   for line in (output or ""):gmatch("[^\r\n]+") do
     local target = line:match("^%s*(esp%w+)%s*$")
     if target then
@@ -289,23 +288,24 @@ function M.parse_targets(output)
 end
 
 --- List the targets supported by the installed ESP-IDF
-function M.get_targets()
+---
+--- idf.py checks its environment on every run, which takes long enough to be
+--- noticeable, so this runs in the background and hands the parsed targets (or
+--- nil) to on_targets on the main loop.
+function M.get_targets(on_targets)
   local cmd = M.resolve_idf_cmd() .. " --list-targets"
-  return M.parse_targets(vim.fn.system(cmd))
+
+  vim.system({ vim.o.shell, vim.o.shellcmdflag, cmd }, { text = true }, function(result)
+    -- idf.py reports environment problems on stderr; only stdout can hold
+    -- targets.
+    local parsed = M.parse_targets(result.stdout)
+    vim.schedule(function()
+      on_targets(parsed)
+    end)
+  end)
 end
 
---- Pick a target and run idf.py set-target
-function M.set_target()
-  -- Cached for the session: the target list only changes with the ESP-IDF
-  -- install, and querying it starts a full idf.py.
-  if not targets then
-    targets = M.get_targets()
-    if not targets then
-      vim.notify("[ESP32] No targets found.", vim.log.levels.WARN)
-      return
-    end
-  end
-
+local function open_target_picker()
   local Snacks = get_snacks()
   Snacks.picker.pick({
     ui_select = true,
@@ -335,6 +335,26 @@ function M.set_target()
       M.command("set-target " .. item.text)
     end,
   })
+end
+
+--- Pick a target and run idf.py set-target
+function M.set_target()
+  -- Cached for the session: the target list only changes with the ESP-IDF
+  -- install, and querying it starts a full idf.py.
+  if targets then
+    open_target_picker()
+    return
+  end
+
+  M.get_targets(function(found)
+    if not found then
+      vim.notify("[ESP32] No targets found.", vim.log.levels.WARN)
+      return
+    end
+
+    targets = found
+    open_target_picker()
+  end)
 end
 
 --- Create Snacks picker for port and run idf.py command

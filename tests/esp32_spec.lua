@@ -10,7 +10,35 @@ local original_idf_python_env_path = vim.env.IDF_PYTHON_ENV_PATH
 local original_idf_tools_path = vim.env.IDF_TOOLS_PATH
 local original_fn = {}
 local original_uv = {}
+local original_system = vim.system
+local original_schedule = vim.schedule
 local notifications = {}
+
+--- Stub vim.system() with a fixed result for the spawned command
+local function set_system_result(result)
+  vim.system = function(_, _, on_exit)
+    on_exit(result)
+    return { wait = function() return result end }
+  end
+end
+
+--- Run fn with vim.schedule() applied inline.
+---
+--- The async target lookup defers its callback off the libuv thread, and
+--- driving the real event loop from inside a case stops MiniTest from running
+--- the remaining ones, so collapse the deferral instead of waiting on it.
+local function run_scheduled(fn)
+  vim.schedule = function(callback)
+    callback()
+  end
+
+  local ok, err = pcall(fn)
+  vim.schedule = original_schedule
+
+  if not ok then
+    error(err)
+  end
+end
 
 local function restore_command(name)
   pcall(vim.api.nvim_del_user_command, name)
@@ -110,6 +138,7 @@ local function prepare_case()
   vim.fn.expand = function()
     return "/home/test"
   end
+  set_system_result({ code = 0, stdout = "", stderr = "" })
   set_scandir({})
 end
 
@@ -139,6 +168,8 @@ T.hooks = {
     vim.fn.expand = original_fn.expand
     vim.uv.fs_scandir = original_uv.fs_scandir
     vim.uv.fs_scandir_next = original_uv.fs_scandir_next
+    vim.system = original_system
+    vim.schedule = original_schedule
   end,
 }
 
@@ -687,9 +718,10 @@ T["parse_targets() keeps target names and drops idf.py diagnostics"] = function(
   local esp32 = load_module()
   reset_plugin_state(esp32)
 
-  -- idf.py reports environment problems on stderr, which vim.fn.system()
-  -- merges into the output it returns.
+  -- idf.py prints more than the target list on stdout, and stderr can be
+  -- folded in by anything that captures both streams.
   local targets = esp32.parse_targets(table.concat({
+    "Running: idf.py --list-targets",
     "WARNING: The IDF_PYTHON_ENV_PATH is missing in environmental variables!",
     "Setting IDF_PATH environment variable: /home/test/esp32-project/esp-idf",
     "esp32",
@@ -739,11 +771,12 @@ T["set_target() runs set-target for the picked target"] = function()
   })
 
   reset_plugin_state(esp32)
-  vim.fn.system = function()
-    return "esp32\nesp32s3\n"
-  end
+  set_system_result({ code = 0, stdout = "esp32\nesp32s3\n", stderr = "" })
 
-  esp32.set_target()
+  run_scheduled(function()
+    esp32.set_target()
+  end)
+
   expect.equality(#picker_spec.items, 2)
 
   picker_spec.confirm({ close = function() end }, { text = "esp32s3" })
@@ -773,11 +806,16 @@ T["set_target() warns and skips the picker when no targets are found"] = functio
   })
 
   reset_plugin_state(esp32)
-  vim.fn.system = function()
-    return "idf.py: command not found\n"
-  end
+  -- idf.py keeps warnings and errors on stderr, so stdout holds no targets.
+  set_system_result({
+    code = 1,
+    stdout = "",
+    stderr = "WARNING: The IDF_PYTHON_ENV_PATH is missing in environmental variables!\n",
+  })
 
-  esp32.set_target()
+  run_scheduled(function()
+    esp32.set_target()
+  end)
 
   expect.equality(picked, false)
   expect.equality(#notifications, 1)
