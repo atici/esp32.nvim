@@ -718,10 +718,10 @@ T["parse_targets() keeps target names and drops idf.py diagnostics"] = function(
   local esp32 = load_module()
   reset_plugin_state(esp32)
 
-  -- idf.py prints more than the target list on stdout, and stderr can be
-  -- folded in by anything that captures both streams.
+  -- Shell startup files prepend to stdout, and stderr can be folded in by
+  -- anything that captures both streams.
   local targets = esp32.parse_targets(table.concat({
-    "Running: idf.py --list-targets",
+    "nvm: version 22 is already in use",
     "WARNING: The IDF_PYTHON_ENV_PATH is missing in environmental variables!",
     "Setting IDF_PATH environment variable: /home/test/esp32-project/esp-idf",
     "esp32",

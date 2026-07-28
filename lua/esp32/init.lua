@@ -270,9 +270,10 @@ end, {})
 function M.parse_targets(output)
   local items = {}
 
-  -- idf.py prints more than the target list on stdout, so only keep lines that
-  -- are a bare target name. Anything else would become a picker entry and, via
-  -- confirm(), reach the shell unescaped.
+  -- The command runs through 'shell', whose startup files print to stdout even
+  -- when non-interactive, so the output is not idf.py's alone. Only keep lines
+  -- that are a bare target name: anything else would become a picker entry
+  -- and, via confirm(), reach the shell unescaped.
   for line in (output or ""):gmatch("[^\r\n]+") do
     local target = line:match("^%s*(esp%w+)%s*$")
     if target then
